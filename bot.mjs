@@ -96,15 +96,19 @@ async function acceptInvitations() {
   }
 }
 
+// Unipile caches list responses per URL and serves stale data; a moving "before" (1 day ahead) makes each URL new.
+const fresh = () => new Date(Date.now() + 86_400_000).toISOString();
+
 async function answerChats(state) {
   // LinkedIn has several inboxes (classic, Sales Navigator...): Unipile lists chats per inbox.
   state.inboxes ??= (await unipile('/inboxes')).data.filter(i => !i.disabled).map(i => i.id);
   const chats = [];
   // shortcut: limit=20 made Unipile drop the newest LinkedIn chat (seen 2026-11-06), so 5 per inbox; page with cursor if more chats matter.
-  for (const inbox of state.inboxes) chats.push(...(await unipile(`/inboxes/${encodeURIComponent(inbox)}/chats`, { query: { limit: 5 } })).data);
+  for (const inbox of state.inboxes) chats.push(...(await unipile(`/inboxes/${encodeURIComponent(inbox)}/chats`, { query: { limit: 5, before: fresh() } })).data);
   // The chat list's last_message_timestamp goes stale, so every listed chat is checked; needsReply skips old messages.
   for (const chat of chats) {
-    const { data: messages } = await unipile(`/chats/${encodeURIComponent(chat.id)}/messages`, { query: { limit: 30 } });
+    // shortcut: limit=30 returned an old page from Unipile (seen 2026-11-06); 10 is newest-first and enough context.
+    const { data: messages } = await unipile(`/chats/${encodeURIComponent(chat.id)}/messages`, { query: { limit: 10, before: fresh() } });
     const last = needsReply(messages, { ...state, now: Date.now() });
     if (!last) continue;
     console.log(new Date().toISOString(), 'writing reply for chat', chat.id);

@@ -54,7 +54,7 @@ node bot.mjs             # live bot, Ctrl+C to stop
 - It doesn't read images, files or links. It acknowledges them honestly instead.
 - It only remembers which messages it has answered while it's running. After a restart it relies on "who sent the last message", which is enough to avoid double replies.
 - It polls every 20 seconds instead of using Unipile webhooks, which would need a public URL.
-- It only checks the 5 most recent chats in each LinkedIn inbox on each pass. Asking Unipile for 20 dropped the newest chat, and the chat list's last-message time goes stale, so the bot reads each chat's messages directly.
+- It only checks the 5 most recent chats in each LinkedIn inbox on each pass. Asking Unipile for 20 dropped the newest chat, and the chat list's last-message time goes stale, so the bot reads the 10 newest messages of each chat directly (asking for 30 returned an old page). Unipile also caches list responses per URL, so each request adds a moving `before` time to get fresh data.
 - Replies use a fixed persona prompt. It has no knowledge base about me beyond that prompt.
 
 Built with Claude Code.
