@@ -100,12 +100,10 @@ async function answerChats(state) {
   // LinkedIn has several inboxes (classic, Sales Navigator...): Unipile lists chats per inbox.
   state.inboxes ??= (await unipile('/inboxes')).data.filter(i => !i.disabled).map(i => i.id);
   const chats = [];
-  // shortcut: limit=20 made Unipile drop the newest LinkedIn chat (seen 2026-11-06), so 10; page with cursor if more chats matter.
-  for (const inbox of state.inboxes) chats.push(...(await unipile(`/inboxes/${encodeURIComponent(inbox)}/chats`, { query: { limit: 10 } })).data);
-  chats.sort((a, b) => new Date(b.last_message_timestamp || 0) - new Date(a.last_message_timestamp || 0)); // newest first
+  // shortcut: limit=20 made Unipile drop the newest LinkedIn chat (seen 2026-11-06), so 5 per inbox; page with cursor if more chats matter.
+  for (const inbox of state.inboxes) chats.push(...(await unipile(`/inboxes/${encodeURIComponent(inbox)}/chats`, { query: { limit: 5 } })).data);
+  // The chat list's last_message_timestamp goes stale, so every listed chat is checked; needsReply skips old messages.
   for (const chat of chats) {
-    const at = chat.last_message_timestamp || chat.last_message?.timestamp;
-    if (at && new Date(at).getTime() < state.startedAt) break; // older chats: never touched
     const { data: messages } = await unipile(`/chats/${encodeURIComponent(chat.id)}/messages`, { query: { limit: 30 } });
     const last = needsReply(messages, { ...state, now: Date.now() });
     if (!last) continue;
