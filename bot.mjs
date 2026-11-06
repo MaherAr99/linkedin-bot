@@ -1,10 +1,13 @@
+import fs from 'node:fs';
 // LinkedIn bot: accepts connection requests and replies to DMs.
 // LinkedIn access goes through Unipile's REST API; replies are written by Google Gemini.
 // Run: node bot.mjs            (live bot)
 //      node bot.mjs "hi there" (print one reply, no LinkedIn calls)
 
-const POLL_MS = 20_000;     // must stay well under the 10-minute "no answer" limit
-const QUIET_MS = 12_000;    // wait this long after their last message so a burst gets one reply
+// Unipile allows 3,000 calls per route per day at most; 35 s keeps each route under that, and well under the 10-minute answer limit.
+const POLL_MS = 35_000;
+const INBOX_MS = 15 * 60_000; // inbox listing shares the daily quota; new inviters' chats are found faster via /users/{id}/chat
+const QUIET_MS = 12_000;   // wait this long after their last message so a burst gets one reply
 const MAX_CHARS = 4_000;    // per message sent to the model; very long messages are cut
 
 const SYSTEM_PROMPT = `You are Maher Al Aridi replying to your own LinkedIn direct messages. Maher is a computer and communication engineer in Beirut, team lead and software QA at FoodStyles.
@@ -88,25 +91,49 @@ async function unipile(path, { method = 'GET', query, json } = {}) {
   return res.json();
 }
 
-async function acceptInvitations() {
-  const { data } = await unipile('/users/me/relation-requests', { query: { type: 'received', limit: 50 } });
+// People whose invitation we accepted: their 1-to-1 chat is watched directly every pass,
+// because Unipile caps each route's calls per day. Saved so a restart keeps watching.
+const WATCH_FILE = '.watch.json'; // gitignored: holds LinkedIn user ids only
+const loadWatch = () => { try { return JSON.parse(fs.readFileSync(WATCH_FILE, 'utf8')); } catch { return []; } };
+const saveWatch = ids => fs.writeFileSync(WATCH_FILE, JSON.stringify(ids));
+
+async function acceptInvitations(state) {
+  const { data } = await unipile('/users/me/relation-requests', { query: { type: 'received', limit: 50, _: Date.now() } }); // _ busts Unipile's cache
   for (const req of data) {
     await unipile(`/users/me/relation-requests/${req.id}/accept`, { method: 'POST' });
     console.log(new Date().toISOString(), 'accepted invitation', req.id);
+    if (req.user?.id && !state.watchUsers.includes(req.user.id)) saveWatch(state.watchUsers = [...state.watchUsers, req.user.id]);
   }
+}
+
+// Chat ids to check this pass: chats with accepted inviters (every pass) + inbox listing (every INBOX_MS, best effort).
+async function chatsToCheck(state) {
+  const ids = new Set(state.knownChats);
+  for (const user of state.watchUsers) {
+    if (state.chatOf.has(user)) continue; // chat already found: no more lookups
+    try {
+      const { data } = await unipile(`/users/${encodeURIComponent(user)}/chat`, { query: { _: Date.now() } });
+      for (const c of data) { ids.add(c.chat_id); state.knownChats.add(c.chat_id); state.chatOf.set(user, c.chat_id); }
+    } catch (e) { console.error(new Date().toISOString(), e.message); }
+  }
+  if (Date.now() - (state.inboxCheckedAt || 0) >= INBOX_MS) {
+    state.inboxCheckedAt = Date.now();
+    try {
+      // shortcut: limit=20 made Unipile drop the newest LinkedIn chat (seen 2026-11-06), so 5; page with cursor if more chats matter.
+      const { data } = await unipile('/inboxes/CLASSIC_PRIMARY/chats', { query: { limit: 5, before: fresh() } });
+      for (const c of data) ids.add(c.id);
+    } catch (e) { console.error(new Date().toISOString(), e.message); }
+  }
+  return ids;
 }
 
 // Unipile caches list responses per URL and serves stale data; a moving "before" (1 day ahead) makes each URL new.
 const fresh = () => new Date(Date.now() + 86_400_000).toISOString();
 
 async function answerChats(state) {
-  // LinkedIn has several inboxes (classic, Sales Navigator...): Unipile lists chats per inbox.
-  state.inboxes ??= (await unipile('/inboxes')).data.filter(i => !i.disabled).map(i => i.id);
-  const chats = [];
-  // shortcut: limit=20 made Unipile drop the newest LinkedIn chat (seen 2026-11-06), so 5 per inbox; page with cursor if more chats matter.
-  for (const inbox of state.inboxes) chats.push(...(await unipile(`/inboxes/${encodeURIComponent(inbox)}/chats`, { query: { limit: 5, before: fresh() } })).data);
-  // The chat list's last_message_timestamp goes stale, so every listed chat is checked; needsReply skips old messages.
-  for (const chat of chats) {
+  // The chat list's last_message_timestamp goes stale, so every chat is checked; needsReply skips old messages.
+  for (const id of await chatsToCheck(state)) {
+    const chat = { id };
     // shortcut: limit=30 returned an old page from Unipile (seen 2026-11-06); 10 is newest-first and enough context.
     const { data: messages } = await unipile(`/chats/${encodeURIComponent(chat.id)}/messages`, { query: { limit: 10, before: fresh() } });
     const last = needsReply(messages, { ...state, now: Date.now() });
@@ -128,7 +155,7 @@ async function main() {
     if (!process.env[k]) throw new Error(`Missing ${k} in .env`);
   if (!process.env.UNIPILE_ACCOUNT_ID.startsWith('acc_')) throw new Error('UNIPILE_ACCOUNT_ID must look like acc_...');
   // Look back 15 min so a restart still answers messages that arrived while the bot was down.
-  const state = { startedAt: Date.now() - 15 * 60_000, answered: new Set() };
+  const state = { startedAt: Date.now() - 15 * 60_000, answered: new Set(), watchUsers: loadWatch(), knownChats: new Set(), chatOf: new Map() };
   console.log('Bot running. Ctrl+C to stop.');
   for (;;) {
     for (const step of [acceptInvitations, answerChats]) {
